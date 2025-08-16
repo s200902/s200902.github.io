@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>超高速リクエスト + Pingツール（サイト状況表示付き）</title>
+<style>
+body { font-family: sans-serif; margin: 20px; }
+input, select, textarea, button {
+display: block; width: 100%; margin-top: 10px; padding: 8px;
+}
+textarea { height: 80px; }
+#requestResponse, #pingResponse {
+margin-top: 20px; padding: 10px; background: #f9f9f9; border: 1px solid #ccc;
+font-family: monospace; white-space: pre-wrap; max-height: 300px; overflow-y: auto;
+}
+.error-log {
+color: red;
+font-size: 0.9em;
+margin-top: 5px;
+}
+/* ログ用テキストエリア */
+#reqLog, #pingLog {
+height: 200px;
+font-family: monospace;
+background: #222;
+color: #0f0;
+overflow-y: auto;
+white-space: pre-wrap;
+margin-top: 10px;
+resize: vertical;
+}
+/* iframeのスタイル */
+.iframe-container {
+margin-top: 15px;
+border: 2px solid #444;
+height: 400px;
+width: 100%;
+}
+iframe {
+width: 100%;
+height: 100%;
+border: none;
+}
+</style>
+</head>
+<body>
+<h1>🚀 超高速リクエスト + ⚡ Pingツール（サイト状況表示付き）</h1>
+
+<!-- リクエスト -->
+<section>
+<h2>📡 リクエストツール</h2>
+<label>URL:</label>
+<input type="text" id="reqUrl" placeholder="https://example.com" />
+<label><input type="checkbox" id="reqProxy" checked> プロキシ使用（CORS回避）</label>
+<label>HTTPメソッド:</label>
+<select id="reqMethod">
+<option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option><option>PATCH</option>
+</select>
+<label>リクエストボディ:</label>
+<textarea id="reqBody" placeholder='{"key":"value"}'></textarea>
+<label>カスタムヘッダー（key:value）:</label>
+<textarea id="reqHeaders" placeholder="Authorization: Bearer xxx"></textarea>
+<label>送信間隔（ミリ秒）:</label>
+<input type="number" id="reqInterval" value="1.51" min="0.5" step="0.01" />
+<button id="reqStart">▶️ 送信開始</button>
+<button id="reqStop" disabled>⏹️ 停止</button>
+<div id="requestResponse">送信回数: 0</div>
+<label>送信ログ:</label>
+<textarea id="reqLog" readonly></textarea>
+<label>対象サイトの状況（リクエストURL）:</label>
+<div class="iframe-container">
+<iframe id="reqIframe" src=""></iframe>
+</div>
+<div class="error-log" id="reqErrors"></div>
+</section>
+
+<hr>
+
+<!-- Ping -->
+<section>
+<h2>⚡ Pingツール</h2>
+<label>Ping対象URL:</label>
+<input type="text" id="pingUrl" placeholder="https://example.com" />
+<label><input type="checkbox" id="pingProxy" checked> プロキシ使用（CORS回避）</label>
+<label>Ping間隔（ミリ秒）:</label>
+<input type="number" id="pingInterval" value="1.51" min="0.5" step="0.01" />
+<button id="pingStart">▶️ Ping開始</button>
+<button id="pingStop" disabled>⏹️ 停止</button>
+<div id="pingResponse">Ping回数: 0</div>
+<label>Pingログ:</label>
+<textarea id="pingLog" readonly></textarea>
+<label>対象サイトの状況（Ping URL）:</label>
+<div class="iframe-container">
+<iframe id="pingIframe" src=""></iframe>
+</div>
+<div class="error-log" id="pingErrors"></div>
+</section>
+
+<script>
+let reqRunning = false, reqCount = 0, reqTimer = null, reqSuccess = 0, reqFail = 0;
+let pingRunning = false, pingCount = 0, pingTimer = null, pingSuccess = 0, pingFail = 0;
+const reqErrorLog = [], pingErrorLog = [];
+const reqLogLines = [];
+const pingLogLines = [];
+
+function parseHeaders(input) {
+const lines = input.split('\n');
+const headers = {};
+for (const line of lines) {
+const [key, ...rest] = line.split(':');
+if (key && rest.length) headers[key.trim()] = rest.join(':').trim();
+}
+return headers;
+}
+
+function updateDisplay() {
+if (reqRunning) {
+document.getElementById('requestResponse').textContent =
+`送信回数: ${reqCount}（成功: ${reqSuccess} / 失敗: ${reqFail}）`;
+document.getElementById('reqErrors').textContent = reqErrorLog.slice(-10).join('\n');
+}
+if (pingRunning) {
+document.getElementById('pingResponse').textContent =
+`Ping回数: ${pingCount}（成功: ${pingSuccess} / 失敗: ${pingFail}）`;
+document.getElementById('pingErrors').textContent = pingErrorLog.slice(-10).join('\n');
+}
+requestAnimationFrame(updateDisplay);
+}
+requestAnimationFrame(updateDisplay);
+
+// URL変更時にiframe更新（リクエスト用）
+document.getElementById('reqUrl').addEventListener('input', () => {
+const url = document.getElementById('reqUrl').value.trim();
+if (url) {
+document.getElementById('reqIframe').src = url;
+} else {
+document.getElementById('reqIframe').src = '';
+}
+});
+
+// URL変更時にiframe更新（Ping用）
+document.getElementById('pingUrl').addEventListener('input', () => {
+const url = document.getElementById('pingUrl').value.trim();
+if (url) {
+document.getElementById('pingIframe').src = url;
+} else {
+document.getElementById('pingIframe').src = '';
+}
+});
+
+// 超高速リクエスト開始
+document.getElementById('reqStart').onclick = () => {
+const baseUrl = document.getElementById('reqUrl').value.trim();
+if (!baseUrl) return alert("URLを入力してください");
+const useProxy = document.getElementById('reqProxy').checked;
+const finalUrl = useProxy ? "https://cors-anywhere.herokuapp.com/" + baseUrl : baseUrl;
+const method = document.getElementById('reqMethod').value;
+const body = document.getElementById('reqBody').value;
+const headers = parseHeaders(document.getElementById('reqHeaders').value);
+const interval = parseFloat(document.getElementById('reqInterval').value) || 1.51;
+
+if (method !== 'GET' && body.trim()) headers['Content-Type'] = 'application/json';
+const options = { method, headers };
+if (method !== 'GET' && body.trim()) options.body = body;
+
+reqRunning = true;
+reqCount = 0; reqSuccess = 0; reqFail = 0; reqErrorLog.length = 0;
+reqLogLines.length = 0;
+document.getElementById('reqLog').value = '';
+document.getElementById('reqStart').disabled = true;
+document.getElementById('reqStop').disabled = false;
+
+reqTimer = setInterval(async () => {
+if (!reqRunning) return;
+reqCount++;
+try {
+const res = await fetch(finalUrl, options);
+reqSuccess++;
+
+let textSnippet = '';
+try {
+const text = await res.clone().text();
+textSnippet = text.slice(0, 100).replace(/\s+/g, ' ');
+} catch {
+textSnippet = '';
+}
+
+addReqLog(`[${new Date().toLocaleTimeString()}] 成功: ${res.status} ${res.statusText} - ${textSnippet}`);
+
+} catch (err) {
+reqFail++;
+addReqLog(`[${new Date().toLocaleTimeString()}] エラー: ${err.message}`);
+}
+}, interval);
+};
+
+// 超高速リクエスト停止
+document.getElementById('reqStop').onclick = () => {
+reqRunning = false;
+clearInterval(reqTimer);
+document.getElementById('reqStart').disabled = false;
+document.getElementById('reqStop').disabled = true;
+};
+
+// Ping開始
+document.getElementById('pingStart').onclick = () => {
+const baseUrl = document.getElementById('pingUrl').value.trim();
+if (!baseUrl) return alert("Ping URLを入力してください");
+const useProxy = document.getElementById('pingProxy').checked;
+const finalUrl = useProxy ? "https://cors-anywhere.herokuapp.com/" + baseUrl : baseUrl;
+const interval = parseFloat(document.getElementById('pingInterval').value) || 1.51;
+
+pingRunning = true;
+pingCount = 0; pingSuccess = 0; pingFail = 0; pingErrorLog.length = 0;
+pingLogLines.length = 0;
+document.getElementById('pingLog').value = '';
+document.getElementById('pingStart').disabled = true;
+document.getElementById('pingStop').disabled = false;
+
+pingTimer = setInterval(async () => {
+if (!pingRunning) return;
+pingCount++;
+try {
+const res = await fetch(finalUrl, { method: 'HEAD', cache: 'no-store' });
+pingSuccess++;
+addPingLog(`[${new Date().toLocaleTimeString()}] 成功: ${res.status} ${res.statusText}`);
+} catch (err) {
+pingFail++;
+addPingLog(`[${new Date().toLocaleTimeString()}] エラー: ${err.message}`);
+}
+}, interval);
+};
+
+// Ping停止
+document.getElementById('pingStop').onclick = () => {
+pingRunning = false;
+clearInterval(pingTimer);
+document.getElementById('pingStart').disabled = false;
+document.getElementById('pingStop').disabled = true;
+};
+
+// 超高速リクエストログ更新
+function addReqLog(line) {
+reqLogLines.unshift(line);
+if (reqLogLines.length > 100) reqLogLines.pop();
+document.getElementById('reqLog').value = reqLogLines.join('\n');
+}
+
+// Pingログ更新
+function addPingLog(line) {
+pingLogLines.unshift(line);
+if (pingLogLines.length > 100) pingLogLines.pop();
+document.getElementById('pingLog').value = pingLogLines.join('\n');
+}
+</script>
+</body>
+</html>
